@@ -172,6 +172,66 @@ class SerieStorage {
     continueList = continueList.filter((item) => item.serieId !== serieId);
     this.saveContinueWatchingList(continueList);
   }
+
+  // Language preference management
+  static getLanguagePreference(serieId = window.SERIE_ID) {
+    try {
+      const preference = localStorage.getItem(`kc-language-${serieId}`);
+      return preference || "sub"; // Default to "sub" if no preference
+    } catch (error) {
+      console.error("Error loading language preference:", error);
+      return "sub";
+    }
+  }
+
+  static saveLanguagePreference(language, serieId = window.SERIE_ID) {
+    try {
+      localStorage.setItem(`kc-language-${serieId}`, language);
+    } catch (error) {
+      console.error("Error saving language preference:", error);
+    }
+  }
+
+  static selectBestLanguage(availableLanguages, serieId = window.SERIE_ID) {
+    const preferredLanguage = this.getLanguagePreference(serieId);
+
+    // If preferred language is available, use it
+    if (availableLanguages[preferredLanguage]) {
+      return {
+        language: preferredLanguage,
+        isPreferred: true,
+        fallbackUsed: false,
+      };
+    }
+
+    // If preferred language is not available, try fallback order
+    const fallbackOrder = ["sub", "lat", "esp", "eng"];
+
+    for (const language of fallbackOrder) {
+      if (availableLanguages[language]) {
+        return {
+          language: language,
+          isPreferred: false,
+          fallbackUsed: true,
+          preferredLanguage: preferredLanguage,
+        };
+      }
+    }
+
+    // If none of the fallbacks are available, use the first available language
+    const firstAvailable = Object.keys(availableLanguages)[0];
+    return {
+      language: firstAvailable,
+      isPreferred: false,
+      fallbackUsed: true,
+      preferredLanguage: preferredLanguage,
+    };
+  }
+
+  // Helper function for backward compatibility - returns just the language string
+  static getBestLanguage(availableLanguages, serieId = window.SERIE_ID) {
+    return this.selectBestLanguage(availableLanguages, serieId).language;
+  }
 }
 
 // Global Variables
@@ -255,6 +315,10 @@ let currentEpisode = 1;
 
 // Initialize serie page
 function initializeSeriePage() {
+  // Initialize language preference from localStorage
+  selectedLanguage = SerieStorage.getLanguagePreference();
+  currentLanguage = selectedLanguage;
+
   populateHeroSection();
   loadSerieProgress();
   updatePlayButton();
@@ -557,11 +621,18 @@ function playEpisode(season, episode, isUserAction = true) {
 
   const episodeData = window.SERIE_DATA.episodesData[season][episode - 1];
 
-  // Verificar si el idioma seleccionado está disponible
-  if (!episodeData.languages[selectedLanguage]) {
-    // Si el idioma seleccionado no está disponible, usar el primer idioma disponible
-    selectedLanguage = Object.keys(episodeData.languages)[0];
-    currentLanguage = selectedLanguage;
+  // Use the best available language based on user preference
+  const languageSelection = SerieStorage.selectBestLanguage(
+    episodeData.languages
+  );
+  selectedLanguage = languageSelection.language;
+  currentLanguage = languageSelection.language;
+
+  // Show notification if fallback language is used
+  if (languageSelection.fallbackUsed && isUserAction) {
+    console.log(
+      `Idioma preferido "${languageSelection.preferredLanguage}" no disponible. Usando "${languageSelection.language}" como alternativa.`
+    );
   }
 
   const videoUrl = episodeData.languages[selectedLanguage].videoUrl;
@@ -675,7 +746,9 @@ function playEpisode(season, episode, isUserAction = true) {
             (data.type === Hls.ErrorTypes.NETWORK_ERROR &&
               data.details === Hls.ErrorDetails.MANIFEST_LOAD_ERROR)
           ) {
-            showVideoError("Error al cargar el video");
+            // Permitir retry para errores de red
+            const allowRetry = data.type === Hls.ErrorTypes.NETWORK_ERROR;
+            showVideoError("Error al cargar el video", allowRetry);
           }
         });
       } else if (
@@ -735,7 +808,7 @@ function playEpisode(season, episode, isUserAction = true) {
     })
     .catch((error) => {
       console.error("Failed to load HLS:", error);
-      showVideoError("Error al cargar el reproductor");
+      showVideoError("Error al cargar el reproductor", false); // No retry para errores del reproductor
     });
 
   // Actualizar el botón de siguiente episodio
@@ -796,12 +869,8 @@ function hideLoader() {
   loadingScreen.style.display = "none";
   isVideoReady = true;
 
-  // Limpiar overlay de error si existe (backup de seguridad)
-  const errorOverlay = document.getElementById("videoErrorOverlay");
-  if (errorOverlay) {
-    errorOverlay.style.display = "none";
-    errorOverlay.remove();
-  }
+  // Limpiar completamente cualquier estado de error cuando el video carga exitosamente
+  restoreVideoControls();
 
   // Mostrar controles permanentemente hasta la primera interacción
   showControls(false); // false = no auto-hide
@@ -819,6 +888,35 @@ video.addEventListener("loadeddata", () => {
     hideLoader();
   }
 });
+
+// Eventos adicionales para detectar recuperación de errores
+video.addEventListener("loadedmetadata", () => {
+  // Si hay metadata, el video ha cargado exitosamente - limpiar errores
+  const errorOverlay = document.getElementById("videoErrorOverlay");
+  if (errorOverlay && video.duration > 0) {
+    restoreVideoControls();
+  }
+});
+
+video.addEventListener("canplaythrough", () => {
+  // El video puede reproducirse completamente - limpiar cualquier error
+  const errorOverlay = document.getElementById("videoErrorOverlay");
+  if (errorOverlay) {
+    restoreVideoControls();
+  }
+});
+
+// Verificación periódica para limpiar errores cuando el video se vuelve reproducible
+setInterval(() => {
+  const errorOverlay = document.getElementById("videoErrorOverlay");
+  if (errorOverlay && errorOverlay.style.display === "flex") {
+    // Si hay un overlay de error pero el video es reproducible, limpiarlo
+    if (video.readyState >= 3 && video.duration > 0) {
+      console.log("Video recuperado, limpiando overlay de error");
+      restoreVideoControls();
+    }
+  }
+}, 2000); // Verificar cada 2 segundos
 
 // Controles de visibilidad
 function showControls(autoHide = true) {
@@ -954,7 +1052,10 @@ function updateLanguageButton() {
   }
 }
 
-function showVideoError(errorMessage = "Error al cargar el video") {
+function showVideoError(
+  errorMessage = "Error al cargar el video",
+  allowRetry = true
+) {
   // Asegurar que el reproductor esté abierto y visible
   playerModal.style.display = "block";
   playerModal.classList.add("active");
@@ -1024,6 +1125,18 @@ function showVideoError(errorMessage = "Error al cargar el video") {
   // Actualizar botones según episodio actual
   updateNextEpisodeButton();
   updateLanguageButton();
+
+  // Retry automático después de 5 segundos para errores temporales
+  if (allowRetry) {
+    setTimeout(() => {
+      const currentErrorOverlay = document.getElementById("videoErrorOverlay");
+      if (currentErrorOverlay && currentErrorOverlay.style.display === "flex") {
+        // Intentar cargar el video nuevamente
+        console.log("Intentando recuperar video automáticamente...");
+        playEpisode(currentSeason, currentEpisode, false);
+      }
+    }, 5000);
+  }
 }
 
 function restoreVideoControls() {
@@ -1053,6 +1166,9 @@ function restoreVideoControls() {
     // Eliminar completamente el overlay para evitar problemas de estado
     errorOverlay.remove();
   }
+
+  // Marcar que el video está listo después de limpiar errores
+  isVideoReady = true;
 }
 
 // Tap para mostrar/ocultar controles
@@ -1372,6 +1488,23 @@ function updateLanguageSelection() {
 function changeVideoLanguage(newLanguage) {
   if (newLanguage === currentLanguage) return;
 
+  // Save language preference for this series
+  SerieStorage.saveLanguagePreference(newLanguage);
+
+  // Guardar el idioma anterior y tiempo actual antes de empezar el cambio
+  const previousLanguage = currentLanguage;
+  const timeToRestore = video.currentTime;
+
+  // Guardar progreso del idioma actual antes de cambiar (por si el cambio falla)
+  if (video.currentTime > 0 && video.duration > 0) {
+    SerieStorage.updateEpisodeProgress(
+      currentSeason,
+      currentEpisode,
+      video.currentTime,
+      video.duration
+    );
+  }
+
   // Mostrar loader durante el cambio de idioma
   loadingScreen.style.display = "flex";
   loadingScreen.classList.remove("hide");
@@ -1396,36 +1529,95 @@ function changeVideoLanguage(newLanguage) {
       loadingScreen.classList.add("hide");
       isVideoReady = true;
       showControls();
+      // No cambiar currentLanguage si el idioma no está disponible
     }, 2000);
     return;
   }
 
   const newUrl = episodeData.languages[newLanguage].videoUrl;
 
-  // Guardar tiempo actual
-  const timeToRestore = video.currentTime;
-
-  // Cambiar idioma actual
-  currentLanguage = newLanguage;
-  selectedLanguage = newLanguage;
-
-  // Update cast button for new language
-  updateCastButton();
-
   // Configurar propiedades del video para evitar loop
   video.loop = false;
   video.autoplay = true;
 
-  // Función común para restaurar el tiempo y ocultar loader
-  function restoreTimeAndFinish() {
+  // Función común para manejar éxito del cambio de idioma
+  function handleLanguageChangeSuccess() {
     setTimeout(() => {
       if (video.duration && timeToRestore < video.duration) {
         video.currentTime = timeToRestore;
       }
+      // Solo cambiar currentLanguage si el cambio fue exitoso
+      currentLanguage = newLanguage;
+      selectedLanguage = newLanguage;
+
+      // Update cast button for new language
+      updateCastButton();
+
       isVideoReady = true;
       restoreVideoControls();
       showControls();
     }, 500); // Pequeño delay para asegurar que el video esté listo
+  }
+
+  // Función para manejar error del cambio de idioma
+  function handleLanguageChangeError() {
+    console.error("Error al cambiar idioma, revirtiendo al idioma anterior");
+
+    // Revertir al idioma anterior
+    currentLanguage = previousLanguage;
+    selectedLanguage = previousLanguage;
+
+    // Obtener URL del idioma anterior
+    const previousUrl = episodeData.languages[previousLanguage].videoUrl;
+
+    // Restaurar video con el idioma anterior
+    loadHLS()
+      .then((Hls) => {
+        const isHLSVideo =
+          previousUrl.includes(".m3u8") || previousUrl.includes("m3u8");
+
+        if (isHLSVideo && Hls.isSupported() && hls) {
+          hls.destroy();
+          hls = new Hls({
+            autoStartLoad: true,
+            startPosition: -1,
+            capLevelToPlayerSize: false,
+            debug: false,
+            liveDurationInfinity: false,
+            backBufferLength: 30,
+            maxBufferLength: 30,
+            maxMaxBufferLength: 60,
+            enableWorker: true,
+            liveSyncDurationCount: 3,
+            liveMaxLatencyDurationCount: Infinity,
+          });
+
+          hls.on(Hls.Events.MANIFEST_PARSED, handleLanguageChangeSuccess);
+          hls.loadSource(previousUrl);
+          hls.attachMedia(video);
+        } else if (
+          isHLSVideo &&
+          video.canPlayType("application/vnd.apple.mpegurl")
+        ) {
+          video.src = previousUrl;
+          video.addEventListener(
+            "loadedmetadata",
+            handleLanguageChangeSuccess,
+            { once: true }
+          );
+        } else {
+          video.src = previousUrl;
+          video.addEventListener(
+            "loadedmetadata",
+            handleLanguageChangeSuccess,
+            { once: true }
+          );
+        }
+      })
+      .catch(() => {
+        // Si también falla la reversión, mostrar error
+        showVideoError("Error al cargar idioma", false);
+      });
   }
 
   // Cambiar fuente de video
@@ -1460,7 +1652,7 @@ function changeVideoLanguage(newLanguage) {
         hls.on(Hls.Events.MANIFEST_PARSED, function () {
           if (!manifestParsed) {
             manifestParsed = true;
-            restoreTimeAndFinish();
+            handleLanguageChangeSuccess();
           }
         });
 
@@ -1470,9 +1662,20 @@ function changeVideoLanguage(newLanguage) {
             errorOccurred = true;
             console.error("HLS Error al cambiar idioma:", data);
 
-            // Solo mostrar error para errores fatales
-            if (data.fatal) {
-              showVideoError("Error al cargar idioma");
+            // Solo mostrar error para errores realmente críticos
+            if (
+              data.fatal ||
+              (data.type === Hls.ErrorTypes.NETWORK_ERROR &&
+                data.details === Hls.ErrorDetails.MANIFEST_LOAD_ERROR)
+            ) {
+              handleLanguageChangeError("Error al cargar idioma");
+            } else {
+              // Para errores no fatales, intentar recuperar después de un delay
+              setTimeout(() => {
+                if (video.readyState >= 2) {
+                  handleLanguageChangeSuccess();
+                }
+              }, 3000);
             }
           }
         });
@@ -1493,14 +1696,14 @@ function changeVideoLanguage(newLanguage) {
           if (!metadataLoaded) {
             metadataLoaded = true;
             video.removeEventListener("loadedmetadata", handleLoadedMetadata);
-            restoreTimeAndFinish();
+            handleLanguageChangeSuccess();
           }
         }
 
         function handleError() {
           video.removeEventListener("error", handleError);
           video.removeEventListener("loadedmetadata", handleLoadedMetadata);
-          showVideoError("Error al cargar idioma");
+          handleLanguageChangeError("Error al cargar idioma");
         }
 
         video.addEventListener("loadedmetadata", handleLoadedMetadata);
@@ -1515,14 +1718,14 @@ function changeVideoLanguage(newLanguage) {
           if (!metadataLoaded) {
             metadataLoaded = true;
             video.removeEventListener("loadedmetadata", handleLoadedMetadata);
-            restoreTimeAndFinish();
+            handleLanguageChangeSuccess();
           }
         }
 
         function handleError() {
           video.removeEventListener("error", handleError);
           video.removeEventListener("loadedmetadata", handleLoadedMetadata);
-          showVideoError("Error al cargar idioma");
+          handleLanguageChangeError("Error al cargar idioma");
         }
 
         video.addEventListener("loadedmetadata", handleLoadedMetadata);
@@ -1531,7 +1734,7 @@ function changeVideoLanguage(newLanguage) {
     })
     .catch((error) => {
       console.error("Failed to load HLS for language change:", error);
-      showVideoError("Error al cargar el reproductor");
+      handleLanguageChangeError("Error al cargar el reproductor");
     });
 }
 
@@ -2010,8 +2213,8 @@ function enterFullscreen() {
   const playerContainer = document.getElementById("playerContainer");
 
   if (playerContainer.requestFullscreen) {
-    return playerContainer.requestFullscreen().catch((err) => {
-      // Error entering fullscreen
+    return playerContainer.requestFullscreen().catch(() => {
+      // Error entering fullscreen - silently handle
     });
   } else if (playerContainer.webkitRequestFullscreen) {
     return playerContainer.webkitRequestFullscreen();
@@ -2167,8 +2370,8 @@ function initializeSynopsis() {
   const readMoreBtn = document.getElementById("readMoreBtn");
 
   if (synopsisText && readMoreBtn) {
-    const shortText = SERIE_DATA.synopsis.short;
-    const fullText = SERIE_DATA.synopsis.full;
+    const shortText = window.SERIE_DATA.synopsis.short;
+    const fullText = window.SERIE_DATA.synopsis.full;
 
     // Set initial text
     synopsisText.textContent = shortText;
@@ -2350,11 +2553,13 @@ function updateAddToListButton() {
 // Initialize Add to List functionality
 initializeAddToListButton();
 
-// Funciones globales para botones de error
+// Funciones globales para botones de error (llamadas desde HTML generado)
+// eslint-disable-next-line no-unused-vars
 function changeLanguage() {
   showLanguageOverlay();
 }
 
+// eslint-disable-next-line no-unused-vars
 function closePlayer() {
   handleEscapeAction();
   playerModal.classList.remove("active");
