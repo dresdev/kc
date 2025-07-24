@@ -738,6 +738,13 @@ function playEpisode(season, episode, isUserAction = true) {
       showVideoError("Error al cargar el reproductor");
     });
 
+  // Timeout de seguridad para móviles - limpiar errores después de un tiempo razonable
+  setTimeout(() => {
+    if (video.readyState >= 1 || video.buffered.length > 0) {
+      hideLoader();
+    }
+  }, 3000); // 3 segundos después de iniciar carga
+
   // Actualizar el botón de siguiente episodio
   updateNextEpisodeButton();
 
@@ -803,6 +810,9 @@ function hideLoader() {
     errorOverlay.remove();
   }
 
+  // Restaurar controles de video completamente
+  restoreVideoControls();
+
   // Mostrar controles permanentemente hasta la primera interacción
   showControls(false); // false = no auto-hide
   // Intentar reproducir automáticamente
@@ -819,6 +829,25 @@ video.addEventListener("loadeddata", () => {
     hideLoader();
   }
 });
+
+// Eventos adicionales para móviles - ser más agresivo en la detección
+video.addEventListener("loadedmetadata", () => {
+  // En móviles, metadata loading puede ser suficiente para mostrar que está funcionando
+  setTimeout(() => {
+    if (video.readyState >= 1) {
+      hideLoader();
+    }
+  }, 100);
+});
+
+video.addEventListener("progress", () => {
+  // Si está descargando datos, significa que está funcionando
+  if (video.buffered.length > 0) {
+    hideLoader();
+  }
+});
+
+video.addEventListener("canplaythrough", hideLoader);
 
 // Controles de visibilidad
 function showControls(autoHide = true) {
