@@ -669,7 +669,14 @@ function playEpisode(season, episode, isUserAction = true) {
 
         hls.on(Hls.Events.ERROR, function (event, data) {
           console.error("HLS Error:", data);
-          showVideoError("Error al cargar el video");
+          // Solo mostrar error para errores fatales o de red persistentes
+          if (
+            data.fatal ||
+            (data.type === Hls.ErrorTypes.NETWORK_ERROR &&
+              data.details === Hls.ErrorDetails.MANIFEST_LOAD_ERROR)
+          ) {
+            showVideoError("Error al cargar el video");
+          }
         });
       } else if (
         isHLSVideo &&
@@ -788,6 +795,14 @@ function hideLoader() {
   loadingScreen.classList.add("hide");
   loadingScreen.style.display = "none";
   isVideoReady = true;
+
+  // Limpiar overlay de error si existe (backup de seguridad)
+  const errorOverlay = document.getElementById("videoErrorOverlay");
+  if (errorOverlay) {
+    errorOverlay.style.display = "none";
+    errorOverlay.remove();
+  }
+
   // Mostrar controles permanentemente hasta la primera interacción
   showControls(false); // false = no auto-hide
   // Intentar reproducir automáticamente
@@ -1031,10 +1046,12 @@ function restoreVideoControls() {
   loadingScreen.style.display = "none";
   loadingScreen.classList.add("hide");
 
-  // Ocultar overlay de error si existe
+  // Ocultar y eliminar overlay de error si existe
   const errorOverlay = document.getElementById("videoErrorOverlay");
   if (errorOverlay) {
     errorOverlay.style.display = "none";
+    // Eliminar completamente el overlay para evitar problemas de estado
+    errorOverlay.remove();
   }
 }
 
@@ -1453,6 +1470,7 @@ function changeVideoLanguage(newLanguage) {
             errorOccurred = true;
             console.error("HLS Error al cambiar idioma:", data);
 
+            // Solo mostrar error para errores fatales
             if (data.fatal) {
               showVideoError("Error al cargar idioma");
             }
