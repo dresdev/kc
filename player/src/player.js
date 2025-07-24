@@ -254,10 +254,12 @@ const video = document.getElementById("video");
 video.loop = false;
 video.preload = "metadata";
 
-// Override agresivo de métodos del video para prevenir auto-reproducción después de completado
+// Override de métodos del video para prevenir auto-reproducción después de completado
 const originalPlay = video.play.bind(video);
 video.play = function () {
+  // Solo bloquear si el video está completado Y está muy cerca del final
   if (window.isVideoCompleted && video.currentTime >= video.duration - 0.5) {
+    console.log("Play bloqueado: video completado");
     return Promise.resolve();
   }
   return originalPlay();
@@ -670,10 +672,11 @@ function playEpisode(season, episode, isUserAction = true) {
 
   // Configurar propiedades del video para evitar loop
   video.loop = false;
-  video.autoplay = true; // Mantener autoplay pero sin loop
+  video.autoplay = false; // Desactivar autoplay para evitar conflictos
 
   // Remover cualquier evento anterior que pueda estar causando auto-replay
   video.removeAttribute("loop");
+  video.removeAttribute("autoplay");
 
   // Load video with dynamic HLS loading
   loadHLS()
@@ -730,7 +733,15 @@ function playEpisode(season, episode, isUserAction = true) {
             video.currentTime = progress.currentTime;
           }
 
-          video.play();
+          // Reproducir solo una vez, sin duplicar
+          if (video.paused) {
+            console.log("HLS: Iniciando reproducción del video");
+            video.play().catch(() => {
+              console.log("HLS: Autoplay prevented por el navegador");
+            });
+          } else {
+            console.log("HLS: Video ya está reproduciéndose, no duplicar");
+          }
           hasUserInteracted = true;
           showControls();
 
@@ -766,7 +777,12 @@ function playEpisode(season, episode, isUserAction = true) {
             video.currentTime = progress.currentTime;
           }
 
-          video.play();
+          // Reproducir solo una vez, sin duplicar
+          if (video.paused) {
+            video.play().catch(() => {
+              // Autoplay prevented
+            });
+          }
           hasUserInteracted = true;
           showControls();
         });
@@ -792,7 +808,12 @@ function playEpisode(season, episode, isUserAction = true) {
             video.currentTime = progress.currentTime;
           }
 
-          video.play();
+          // Reproducir solo una vez, sin duplicar
+          if (video.paused) {
+            video.play().catch(() => {
+              // Autoplay prevented
+            });
+          }
           hasUserInteracted = true;
           showControls();
 
@@ -874,10 +895,9 @@ function hideLoader() {
 
   // Mostrar controles permanentemente hasta la primera interacción
   showControls(false); // false = no auto-hide
-  // Intentar reproducir automáticamente
-  video.play().catch((err) => {
-    // Autoplay was prevented
-  });
+
+  // No llamar video.play() aquí para evitar duplicación
+  // El play() se maneja en los eventos específicos (MANIFEST_PARSED, loadedmetadata)
 }
 
 // Eventos para detectar cuando el video está listo
@@ -1320,9 +1340,11 @@ video.addEventListener("ended", () => {
   }
 });
 
-// Event listener interceptor para prevenir ANY play después de completado
+// Event listener interceptor para prevenir play después de completado
 video.addEventListener("play", () => {
+  // Solo bloquear si realmente está completado Y muy cerca del final
   if (isVideoCompleted && video.currentTime >= video.duration - 0.5) {
+    console.log("Event interceptor: pausando video completado");
     video.pause();
     video.currentTime = video.duration;
     updatePlayPause();
@@ -1353,14 +1375,20 @@ video.addEventListener("timeupdate", () => {
   }
 });
 
-// Monitoreo agresivo cada 500ms para asegurar que el video permanezca pausado cuando debe estarlo
+// Monitoreo menos agresivo cada 2 segundos para asegurar que el video permanezca pausado cuando debe estarlo
 setInterval(() => {
-  if (isVideoCompleted && !video.paused) {
+  // Solo actuar si realmente está completado Y está reproduciendo
+  if (
+    isVideoCompleted &&
+    !video.paused &&
+    video.currentTime >= video.duration - 1
+  ) {
+    console.log("Monitor: pausando video completado");
     video.pause();
     video.currentTime = video.duration;
     updatePlayPause();
   }
-}, 500);
+}, 2000); // Reducido de 500ms a 2s para ser menos agresivo
 
 // Reset del estado cuando el usuario busca manualmente a una posición anterior
 video.addEventListener("seeking", () => {
@@ -1538,7 +1566,7 @@ function changeVideoLanguage(newLanguage) {
 
   // Configurar propiedades del video para evitar loop
   video.loop = false;
-  video.autoplay = true;
+  video.autoplay = false; // Desactivar autoplay también en cambio de idioma
 
   // Función común para manejar éxito del cambio de idioma
   function handleLanguageChangeSuccess() {
@@ -2004,10 +2032,12 @@ video.addEventListener("timeupdate", () => {
   if (video.duration > 0 && video.currentTime > 0) {
     const timeRemaining = video.duration - video.currentTime;
 
-    // Si quedan menos de 0.8 segundos, pausar inmediatamente
-    if (timeRemaining <= 0.8 && !video.paused) {
+    // Solo pausar si quedan menos de 0.2 segundos para reducir pausas prematuras
+    if (timeRemaining <= 0.2 && !video.paused) {
+      console.log("TimeUpdate: pausando video cerca del final");
       video.pause();
       video.currentTime = video.duration;
+      setVideoCompletedState(true);
       updatePlayPause();
       showControls(false);
 
